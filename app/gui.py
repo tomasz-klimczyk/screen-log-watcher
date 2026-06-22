@@ -23,7 +23,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QKeySequence, QPainter, QPen, QPixmap, QShortcut
+from PySide6.QtGui import QBrush, QColor, QFont, QGuiApplication, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
