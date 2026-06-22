@@ -1,0 +1,82 @@
+{
+    "rules": [
+        {
+            "name": "CRITICAL_ERROR",
+            "category": "Błąd krytyczny",
+            "keywords": [
+                "ERROR",
+                "ERR",
+                "CRITICAL",
+                "EXCEPTION",
+                "TRACEBACK",
+                "FATAL"
+            ],
+            "severity": "critical"
+        },
+        {
+            "name": "WARNING",
+            "category": "Ostrzeżenie",
+            "keywords": [
+                "WARNING",
+                "WARN"
+            ],
+            "severity": "warning"
+        },
+        {
+            "name": "FAILED_OPERATION",
+            "category": "Błąd krytyczny",
+            "keywords": [
+                "FAILED",
+                "FAIL"
+            ],
+            "severity": "critical"
+        },
+        {
+            "name": "TIMEOUT",
+            "category": "Inne",
+            "keywords": [
+                "TIMEOUT"
+            ],
+            "severity": "warning"
+        },
+        {
+            "name": "CONNECTION_LOST",
+            "category": "Problem z połączeniem",
+            "keywords": [
+                "DISCONNECTED",
+                "CONNECTION LOST",
+                "REFUSED"
+            ],
+            "severity": "critical"
+        },
+        {
+            "name": "AUTH_PROBLEM",
+            "category": "Problem z autoryzacją",
+            "keywords": [
+                "DENIED",
+                "UNAUTHORIZED",
+                "FORBIDDEN"
+            ],
+            "severity": "critical"
+        },
+        {
+            "name": "MODBUS_TCP_ERROR",
+            "category": "Problem Modbus/TCP",
+            "keywords": [
+                "MODBUS ERROR",
+                "TCP ERROR",
+                "UNIT ID",
+                "CRC"
+            ],
+            "severity": "critical"
+        },
+        {
+            "name": "RETRY",
+            "category": "Ostrzeżenie",
+            "keywords": [
+                "RETRY"
+            ],
+            "severity": "warning"
+        }
+    ]
+}

@@ -1,0 +1,36 @@
+{
+    "capture_region": {
+        "left": 0,
+        "top": 0,
+        "width": 0,
+        "height": 0
+    },
+    "interval_seconds": 1.0,
+    "ocr_language": "eng",
+    "tesseract_path": "",
+    "preprocessing": {
+        "enabled": true,
+        "grayscale": true,
+        "increase_contrast": true,
+        "scale_factor": 2,
+        "binary_threshold": 0
+    },
+    "alerts": {
+        "enabled": true,
+        "sound_enabled": false,
+        "sound_path": ""
+    },
+    "storage": {
+        "save_lines_to_txt": true,
+        "save_lines_to_csv": true,
+        "save_events_to_csv": true,
+        "logs_dir": "./logs",
+        "lines_file": "lines.log",
+        "events_file": "events.csv"
+    },
+    "gui": {
+        "preview_max_width": 480,
+        "max_visible_new_lines": 200,
+        "max_visible_events": 200
+    }
+}
