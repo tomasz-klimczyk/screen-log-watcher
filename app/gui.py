@@ -50,8 +50,62 @@ from .config import AppConfig
 from .log_analyzer import LogAnalyzer
 from .models import DetectedEvent, LogLine, Region
 from .ocr_engine import OCREngine, OCRError
-from .screen_capture import CaptureError, ScreenCapture
 from .storage import Storage
+
+
+def qimage_to_pil(qimage):
+    """Konwertuje QImage (z grabWindow) na PIL.Image w trybie RGB.
+
+    QImage jest bezpieczne do przekazywania między wątkami (nie jest obiektem GUI),
+    dlatego przechwytywanie robimy w wątku GUI, a OCR w wątku roboczym.
+    """
+    from PySide6.QtGui import QImage
+    from PIL import Image
+
+    img = qimage.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = img.width()
+    height = img.height()
+    # W PySide6 bits() zwraca memoryview; bytesPerLine może być > width*4
+    # przez wyrównanie (padding) - dlatego czytamy z uwzględnieniem stride.
+    bpl = img.bytesPerLine()
+    raw = bytes(img.bits())
+    if bpl == width * 4:
+        data = raw
+    else:
+        # Odcinamy padding na końcu każdego wiersza.
+        data = b"".join(raw[y * bpl:y * bpl + width * 4] for y in range(height))
+    pil = Image.frombytes("RGBA", (width, height), data)
+    return pil.convert("RGB")
+
+
+def grab_region_pixmap(region: "Region"):
+    """Przechwytuje zadany Region używając QScreen.grabWindow.
+
+    Zwraca QPixmap (lub None, gdy region niepoprawny). Współrzędne regionu
+    są traktowane jako logiczne (Qt) - dokładnie ten sam układ, w którym
+    region został zaznaczony. Dzięki temu grabWindow zawsze trafia we właściwe
+    miejsce, niezależnie od DPI i liczby monitorów.
+
+    MUSI być wywoływane z wątku GUI.
+    """
+    if not region.is_valid():
+        return None
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QGuiApplication
+
+    # Szukamy ekranu, na którym leży lewy-górny róg regionu.
+    screen = QGuiApplication.screenAt(QPoint(region.left + 1, region.top + 1))
+    if screen is None:
+        screen = QGuiApplication.primaryScreen()
+    if screen is None:
+        return None
+
+    geo = screen.geometry()
+    # Współrzędne regionu względem lewego-górnego rogu tego ekranu (logiczne).
+    local_x = region.left - geo.x()
+    local_y = region.top - geo.y()
+    # grabWindow(screen_id, x, y, w, h) - x,y,w,h w pikselach logicznych ekranu.
+    return screen.grabWindow(0, local_x, local_y, region.width, region.height)
 
 
 # ============================================================================
@@ -189,11 +243,10 @@ class OCRWorker(QObject):
     ocr_text = Signal(str)              # pełen rozpoznany tekst (pojedynczy test)
     new_lines = Signal(list)            # list[LogLine]
     new_events = Signal(list)           # list[DetectedEvent]
-    preview = Signal(object)            # QPixmap
     error = Signal(str)                 # komunikat błędu
     status = Signal(str)                # krótki status
     finished_cycle = Signal(str)        # timestamp ostatniego cyklu
-    trigger_run_once = Signal()         # wyzwolenie pojedynczego cyklu (z GUI)
+    process_image = Signal(object)      # QImage do przetworzenia (z wątku GUI)
 
     def __init__(
         self,
@@ -207,9 +260,7 @@ class OCRWorker(QObject):
         self.base_dir = base_dir
         self.config_path = config_path
         self.rules_path = rules_path
-        self._running = False
 
-        self._capture = ScreenCapture()
         self._ocr = OCREngine(
             tesseract_path=config.tesseract_path,
             language=config.ocr_language,
@@ -217,8 +268,6 @@ class OCRWorker(QObject):
         )
         self._analyzer = LogAnalyzer(config.rules)
         self._storage = Storage(config.storage, base_dir)
-        # Dopasowujemy skalę DPI do ekranu, na którym leży bieżący region.
-        self._capture.set_scale(self._compute_dpi_scale(config.region))
 
     # ----- Sterowanie --------------------------------------------------------
 
@@ -229,49 +278,22 @@ class OCRWorker(QObject):
         self._ocr.set_language(config.ocr_language)
         self._ocr.set_preprocessing(config.preprocessing)
         self._analyzer = LogAnalyzer(config.rules)
-        # Odświeżamy skalę DPI (region mógł trafić na inny monitor).
-        self._capture.set_scale(self._compute_dpi_scale(config.region))
-
-    @staticmethod
-    def _compute_dpi_scale(region: Region) -> float:
-        """Zwraca devicePixelRatio ekranu, na którym leży region.
-
-        Wywoływane z wątku GUI (QGuiApplication jest bezpieczne tylko tam).
-        Qt operuje na pikselach logicznych, mss na fizycznych - ten współczynnik
-        niweluje różnicę na ekranach ze skalowaniem DPI.
-        """
-        try:
-            from PySide6.QtCore import QPointF
-            from PySide6.QtGui import QGuiApplication
-
-            screen = None
-            if region.is_valid():
-                screen = QGuiApplication.screenAt(
-                    QPointF(region.left + 1, region.top + 1)
-                )
-            if screen is None:
-                screen = QGuiApplication.primaryScreen()
-            if screen is None:
-                return 1.0
-            ratio = screen.devicePixelRatio()
-            return float(ratio) if ratio and ratio > 0 else 1.0
-        except Exception:
-            return 1.0
 
     def reset_memory(self) -> None:
         self._analyzer.reset()
 
-    @Slot()
-    def run_once(self) -> None:
-        """Pojedynczy zrzut + OCR (używane przez 'Test OCR' i monitor)."""
-        try:
-            image = self._capture.capture_region(self.config.region)
-        except CaptureError as exc:
-            self.error.emit(str(exc))
-            self.status.emit("Brak obszaru")
-            return
+    @Slot(object)
+    def _on_image(self, qimage) -> None:
+        """Przyjmuje QImage (przechwycony w wątku GUI) i wykonuje OCR + analizę.
 
-        self._emit_preview(image)
+        Slot uruchamiany w wątku roboczym dzięki połączeniu cross-thread.
+        """
+        try:
+            image = qimage_to_pil(qimage)
+        except Exception as exc:
+            self.error.emit(f"Błąd konwersji obrazu: {exc}")
+            self.status.emit("Błąd obrazu")
+            return
 
         timer = QElapsedTimer()
         timer.start()
@@ -308,18 +330,6 @@ class OCRWorker(QObject):
 
         self.finished_cycle.emit(datetime.now().isoformat(timespec="seconds"))
         self.status.emit(f"OCR OK ({elapsed} ms, +{len(new_lines_text)} nowych)")
-
-    def _emit_preview(self, image) -> None:
-        """Konwertuje PIL.Image na QPixmap i emituje."""
-        try:
-            from PIL import ImageQt
-
-            qimage = ImageQt.ImageQt(image.convert("RGBA"))
-            pixmap = QPixmap.fromImage(qimage)
-            self.preview.emit(pixmap)
-        except Exception:
-            # Podgląd jest opcjonalny - nie przerywamy pracy.
-            pass
 
 
 # ============================================================================
@@ -517,17 +527,17 @@ class MainWindow(QMainWindow):
         self._worker.ocr_text.connect(self._on_ocr_text)
         self._worker.new_lines.connect(self._on_new_lines)
         self._worker.new_events.connect(self._on_new_events)
-        self._worker.preview.connect(self._on_preview)
         self._worker.error.connect(self._on_error)
         self._worker.status.connect(self._on_worker_status)
         self._worker.finished_cycle.connect(self._on_finished_cycle)
 
-        # Połączenie sygnału wyzwalającego ze slotem workera.
+        # Połączenie sygnału obrazu ze slotem workera.
         # Dzięki temu emit() z wątku GUI automatycznie trafi do kolejki
-        # zdarzeń wątku workera (QueuedConnection).
-        self._worker.trigger_run_once.connect(self._worker.run_once)
+        # zdarzeń wątku workera (QueuedConnection) - QImage można przekazywać
+        # między wątkami (nie jest obiektem GUI).
+        self._worker.process_image.connect(self._worker._on_image)
 
-        # Timer cyklu monitoringu (żądania do workera).
+        # Timer cyklu monitoringu (przechwytuje w wątku GUI).
         self._monitor_timer = self._create_monitor_timer()
 
     def _create_monitor_timer(self):
@@ -591,8 +601,28 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("Monitoring zatrzymany", 3000)
 
     def _on_monitor_tick(self) -> None:
-        # Wyzwalamy cykl w wątku workera (cross-thread signal/slot).
-        self._worker.trigger_run_once.emit()
+        # Przechwytujemy w wątku GUI (grabWindow tego wymaga), a QImage
+        # wysyłamy do workera, gdzie działa OCR (bez blokowania GUI).
+        self._capture_and_send()
+
+    def _capture_and_send(self) -> bool:
+        """Przechwytuje region (wątek GUI), pokazuje podgląd i wysyła do OCR."""
+        pixmap = grab_region_pixmap(self.config.region)
+        if pixmap is None or pixmap.isNull():
+            self._on_error("Niepoprawny obszar lub brak dostępu do ekranu.")
+            return False
+        # Podgląd od razu w GUI.
+        self._show_preview(pixmap)
+        # QImage do OCR w wątku roboczym (QImage jest thread-safe, QPixmap nie).
+        self._worker.process_image.emit(pixmap.toImage())
+        return True
+
+    def _show_preview(self, pixmap) -> None:
+        scaled = pixmap.scaledToWidth(
+            min(self.config.gui.preview_max_width, pixmap.width()),
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.lbl_preview.setPixmap(scaled)
 
     def _on_test_ocr(self) -> None:
         if not self._thread.isRunning():
@@ -606,7 +636,7 @@ class MainWindow(QMainWindow):
             return
         self._worker.update_config(self.config)
         self.status_bar.showMessage("Wykonuję pojedynczy OCR...", 2000)
-        self._worker.trigger_run_once.emit()
+        self._capture_and_send()
 
     def _on_clear(self) -> None:
         self.list_lines.clear()
@@ -737,16 +767,6 @@ class MainWindow(QMainWindow):
                 if self.config.alerts.sound_enabled:
                     self._play_alert_sound()
 
-    @Slot(object)
-    def _on_preview(self, pixmap) -> None:
-        if pixmap is None or pixmap.isNull():
-            return
-        scaled = pixmap.scaledToWidth(
-            min(self.config.gui.preview_max_width, pixmap.width()),
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.lbl_preview.setPixmap(scaled)
-
     @Slot(str)
     def _on_error(self, message: str) -> None:
         self.status_bar.showMessage(message, 5000)
@@ -768,9 +788,7 @@ class MainWindow(QMainWindow):
     def _refresh_region_label(self) -> None:
         r = self.config.region
         if r.is_valid():
-            scale = self._worker._capture.scale
-            phys = f"  (DPI x{scale}, fizycznie {int(r.left*scale)},{int(r.top*scale)} {int(r.width*scale)}x{int(r.height*scale)})"
-            self.lbl_region.setText(f"L={r.left}, T={r.top}, W={r.width}, H={r.height}{phys}")
+            self.lbl_region.setText(f"L={r.left}, T={r.top}, W={r.width}, H={r.height}")
         else:
             self.lbl_region.setText("nie wybrano (kliknij 'Wybierz obszar')")
 
