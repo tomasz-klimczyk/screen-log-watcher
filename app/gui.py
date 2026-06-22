@@ -217,6 +217,8 @@ class OCRWorker(QObject):
         )
         self._analyzer = LogAnalyzer(config.rules)
         self._storage = Storage(config.storage, base_dir)
+        # Dopasowujemy skalę DPI do ekranu, na którym leży bieżący region.
+        self._capture.set_scale(self._compute_dpi_scale(config.region))
 
     # ----- Sterowanie --------------------------------------------------------
 
@@ -227,6 +229,34 @@ class OCRWorker(QObject):
         self._ocr.set_language(config.ocr_language)
         self._ocr.set_preprocessing(config.preprocessing)
         self._analyzer = LogAnalyzer(config.rules)
+        # Odświeżamy skalę DPI (region mógł trafić na inny monitor).
+        self._capture.set_scale(self._compute_dpi_scale(config.region))
+
+    @staticmethod
+    def _compute_dpi_scale(region: Region) -> float:
+        """Zwraca devicePixelRatio ekranu, na którym leży region.
+
+        Wywoływane z wątku GUI (QGuiApplication jest bezpieczne tylko tam).
+        Qt operuje na pikselach logicznych, mss na fizycznych - ten współczynnik
+        niweluje różnicę na ekranach ze skalowaniem DPI.
+        """
+        try:
+            from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QGuiApplication
+
+            screen = None
+            if region.is_valid():
+                screen = QGuiApplication.screenAt(
+                    QPointF(region.left + 1, region.top + 1)
+                )
+            if screen is None:
+                screen = QGuiApplication.primaryScreen()
+            if screen is None:
+                return 1.0
+            ratio = screen.devicePixelRatio()
+            return float(ratio) if ratio and ratio > 0 else 1.0
+        except Exception:
+            return 1.0
 
     def reset_memory(self) -> None:
         self._analyzer.reset()
@@ -527,8 +557,8 @@ class MainWindow(QMainWindow):
             return
         self.config.region = region
         self._save_config()
+        self._worker.update_config(self.config)  # odświeża też skalę DPI
         self._refresh_region_label()
-        self._worker.update_config(self.config)
         self.status_bar.showMessage(
             f"Ustawiono obszar: {region.left},{region.top} {region.width}x{region.height}",
             4000,
@@ -738,7 +768,9 @@ class MainWindow(QMainWindow):
     def _refresh_region_label(self) -> None:
         r = self.config.region
         if r.is_valid():
-            self.lbl_region.setText(f"L={r.left}, T={r.top}, W={r.width}, H={r.height}")
+            scale = self._worker._capture.scale
+            phys = f"  (DPI x{scale}, fizycznie {int(r.left*scale)},{int(r.top*scale)} {int(r.width*scale)}x{int(r.height*scale)})"
+            self.lbl_region.setText(f"L={r.left}, T={r.top}, W={r.width}, H={r.height}{phys}")
         else:
             self.lbl_region.setText("nie wybrano (kliknij 'Wybierz obszar')")
 

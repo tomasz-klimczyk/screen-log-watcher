@@ -29,11 +29,38 @@ class ScreenCapture:
         # mss tworzy własne kontekst w każdej operacji, ale trzymamy instancję,
         # aby uniknąć wielokrotnego tworzenia obiektu (zysk wydajności).
         self._sct: Optional[mss.base.MSSBase] = None
+        # Współczynnik skalowania DPI (logical -> physical pixels).
+        # Qt podaje współrzędne w pikselach logicznych, mss przechwytuje
+        # w pikselach fizycznych - bez tego na ekranach ze skalowaniem
+        # (np. 125%, 150%) przechwytywany obszar jest przesunięty/zły.
+        self._scale: float = 1.0
 
     def _get_sct(self) -> mss.base.MSSBase:
         if self._sct is None:
             self._sct = mss.mss()
         return self._sct
+
+    def set_scale(self, scale: float) -> None:
+        """Ustawia współczynnik DPI (1.0 = brak skalowania, 1.25/1.5/2.0 = skalowanie)."""
+        try:
+            s = float(scale)
+        except (TypeError, ValueError):
+            s = 1.0
+        self._scale = s if s and s > 0 else 1.0
+
+    @property
+    def scale(self) -> float:
+        return self._scale
+
+    def _physical_monitor(self, region: Region) -> dict:
+        """Przelicza Region (logical) na współrzędne fizyczne dla mss."""
+        s = self._scale
+        return {
+            "left": int(round(region.left * s)),
+            "top": int(round(region.top * s)),
+            "width": int(round(region.width * s)),
+            "height": int(round(region.height * s)),
+        }
 
     def capture_region(self, region: Region) -> Image.Image:
         """Przechwuje zadany Region i zwraca obraz PIL.Image w trybie RGB."""
@@ -42,12 +69,7 @@ class ScreenCapture:
                 "Nie wybrano poprawnego obszaru ekranu (szerokość i wysokość > 0)."
             )
 
-        monitor = {
-            "left": int(region.left),
-            "top": int(region.top),
-            "width": int(region.width),
-            "height": int(region.height),
-        }
+        monitor = self._physical_monitor(region)
 
         sct = self._get_sct()
         try:
