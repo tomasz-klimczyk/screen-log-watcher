@@ -14,6 +14,46 @@ import sys
 import traceback
 
 
+def _enable_dpi_awareness() -> None:
+    """Ustawia per-monitor DPI awareness na Windows (przed PySide6!).
+
+    Bez tego Qt widzi często tylko główny monitor (reszta jest niewidoczna),
+    a zrzuty ekranu mają niską rozdzielczość i są przesunięte. Świadomość DPI
+    musi być ustawiona PRZED utworzeniem QApplication / pierwszym użyciem GUI.
+
+    Kolejno próbujemy nowszego SetProcessDpiAwarenessContext (PER_MONITOR_AWARE_V2,
+    Windows 10 1703+), starszego SetProcessDpiAwareness oraz SetProcessDPIAware.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    # Sposób 1: SetProcessDpiAwarenessContext (-4 = PER_MONITOR_AWARE_V2).
+    try:
+        fn = ctypes.windll.user32.SetProcessDpiAwarenessContext
+        fn.argtypes = [ctypes.c_void_p]
+        fn.restype = ctypes.c_bool
+        if fn(-4):
+            return
+    except Exception:
+        pass
+    # Sposób 2: SetProcessDpiAwareness (2 = PER_MONITOR_AWARE).
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:
+        pass
+    # Sposób 3: SetProcessDPIAware (najstarsze API).
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+# KLUCZOWE: wywołujemy PRZED jakimkolwiek importem PySide6 / tworzeniem QApplication.
+_enable_dpi_awareness()
+
+
 def _project_base_dir() -> str:
     """Zwraca katalog, w którym znajduje się ten plik main.py."""
     return os.path.dirname(os.path.abspath(__file__))
